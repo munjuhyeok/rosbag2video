@@ -26,6 +26,7 @@ from cv_bridge import CvBridge
 import os
 from rclpy.callback_groups import ReentrantCallbackGroup
 import shutil
+import numpy as np
 
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
@@ -169,8 +170,9 @@ class RosVideoWriter(Node):
             self.create_subscription(
                 self.msgtype, topic, self.listener_callback, qos_profile=10, callback_group=my_callback_group
             )
-            if not os.path.exists(topic):
-                os.mkdir(topic)
+            path = "/".join(topic.split("_"))
+            if not os.path.exists(path):
+                os.mkdir(path)
         self._play_process = self._playback_ros_bag()
 
     def _read_ros_bag_info(self):
@@ -383,15 +385,20 @@ class RosVideoWriter(Node):
         # self.msg_fmt = "rgb8"
         # print("AJB: msg: ", msg)
 
-        filename = msg.header.frame_id + "/" + str(msg.header.stamp.sec) + str(msg.header.stamp.nanosec) + ".png"
+        timestamp = str(msg.header.stamp.sec) + "." + str(msg.header.stamp.nanosec // 1000000)
+        path = "/".join(msg.header.frame_id.split("_"))
+        filename = path + "/" + timestamp + ".png"
+
+        img = self.bridge.imgmsg_to_cv2(msg, self.msg_fmt)
 
         if "color" in msg.header.frame_id:
             self.gc_txt.write(self.gc+"\n")
-            self.rgb_txt.write(filename + "\n")
+            self.rgb_txt.write(timestamp + " ")
+            self.rgb_txt.write(msg.header.frame_id.split("_")[0] + " " + timestamp + ".png" + "\n")
         if "depth" in msg.header.frame_id:
-           self.depth_txt.write(filename + "\n")
+            self.depth_txt.write(filename + "\n")
+            img = np.uint16(1000*img)
 
-        img = self.bridge.imgmsg_to_cv2(msg, self.msg_fmt)
         cv2.imwrite(filename, img)
 
         """

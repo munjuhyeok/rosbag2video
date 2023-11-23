@@ -23,9 +23,13 @@ import getopt
 import subprocess
 from rclpy.node import Node
 from cv_bridge import CvBridge
+import os
+from rclpy.callback_groups import ReentrantCallbackGroup
+import shutil
 
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Float64MultiArray
 
 try:
     from theora_image_transport.msg import Packet
@@ -113,6 +117,23 @@ class RosVideoWriter(Node):
         self.bridge = CvBridge()
         self.pix_fmt = "yuv420p"
         self.msg_fmt = ""
+        self.topics = ["right_color", "right_depth", "left_color", "left_depth"]
+        self.gc = ""
+
+        depth_file = "depth.txt"
+        color_file = "rgb.txt"
+        gc_file = "gc.txt"
+
+        if os.path.exists(depth_file):
+            os.remove(depth_file)
+        self.depth_txt = open(depth_file,"x")
+        if os.path.exists(color_file):
+            os.remove(color_file)
+        self.rgb_txt = open(color_file,"x")
+        if os.path.exists(gc_file):
+            os.remove(gc_file)
+        self.gc_txt = open(gc_file,"x")
+
 
         # Checks if a ROS2 bag has been specified in command line.
         if len(args) < 2:
@@ -139,9 +160,17 @@ class RosVideoWriter(Node):
         self._read_ros_bag_info()
         # Set up subscriber for the image message.
         print("AJB: subscribing to msg: ", self.msgtype, "on topic: ", self.opt_topic)
-        self.subscription = self.create_subscription(
-            self.msgtype, self.opt_topic, self.listener_callback, 10
+        my_callback_group = ReentrantCallbackGroup()
+
+        self.create_subscription(
+            Float64MultiArray, "genCo", self.gc_callback, qos_profile=10, callback_group=my_callback_group
         )
+        for topic in self.topics:
+            self.create_subscription(
+                self.msgtype, topic, self.listener_callback, qos_profile=10, callback_group=my_callback_group
+            )
+            if not os.path.exists(topic):
+                os.mkdir(topic)
         self._play_process = self._playback_ros_bag()
 
     def _read_ros_bag_info(self):
@@ -153,14 +182,13 @@ class RosVideoWriter(Node):
             rosbag2_info = str(
                 self._read_info_process.stdout.read(), "utf-8"
             ).splitlines()
-        self.msgfmt_literal, self.count = self.get_topic_info(rosbag2_info)
-        self.msgtype = self.filter_image_msgs(self.msgfmt_literal)
 
-        # DEBUG
-        # print(rosbag2_info)
-        print("ROS Message name = ", self.msgfmt_literal)
-        print("Image count = ", self.count)
-        print("msgtype = ", self.msgtype)
+        for topic in self.topics:
+            self.msgfmt_literal, self.count = self.get_topic_info(rosbag2_info, topic)
+            self.msgtype = self.filter_image_msgs(self.msgfmt_literal)
+            print("ROS Message name = ", self.msgfmt_literal)
+            print("Image count = ", self.count)
+            print("msgtype = ", self.msgtype)
 
     def _playback_ros_bag(self):
         print("Starting ROS bag playback...")
@@ -172,11 +200,11 @@ class RosVideoWriter(Node):
                 self.bag_file,
                 "-r",
                 str(self.rate),
-                "--topics",
+                # "--topics",
                 # HACK AJB Use this for SkateBot
                 # "/camera_node/image_raw/compressed",
                 # HACK AJB Use this for joeys.
-                "/je7c/camera/compressed",
+                # self.opt_topic,
             ]
         )
         return process
@@ -303,14 +331,14 @@ class RosVideoWriter(Node):
     Returns only the first two info.
     """
 
-    def get_topic_info(self, rosbag2_info):
+    def get_topic_info(self, rosbag2_info, topic):
         msgtype = ""
         count = 0
         # serialtype = ''  # Unused
 
         for line in rosbag2_info:
             # print("gti: line:", line)
-            if self.opt_topic in line:
+            if topic in line:
                 parse_line = line.split()
                 for word_index in range(0, len(parse_line)):
                     if "Type:" in parse_line[word_index]:
@@ -336,8 +364,11 @@ class RosVideoWriter(Node):
     7. Removes all individual frames.
     """
 
+    def gc_callback(self, msg):
+        self.gc = " ".join(str(round(e,4)) for e in msg.data)
+
     def listener_callback(self, msg):
-        self.get_logger().info("Image Received [%i/%i]" % (self.frame_no, self.count))
+        # self.get_logger().info("Image Received [%i/%i]" % (self.frame_no, self.count))
 
         # Original code.  Doesn't work for compressed images.
         # if not self.pix_fmt_already_set:
@@ -348,12 +379,19 @@ class RosVideoWriter(Node):
         #     msg.encoding = "mono16"
 
         # HACK to get this working...
-        self.pix_fmt = "rgb24"
-        self.msg_fmt = "rgb8"
+        # self.pix_fmt = "rgb24"
+        # self.msg_fmt = "rgb8"
         # print("AJB: msg: ", msg)
 
-        img = self.bridge.compressed_imgmsg_to_cv2(msg, self.msg_fmt)
-        filename = str(self.frame_no).zfill(4) + ".png"
+        filename = msg.header.frame_id + "/" + str(msg.header.stamp.sec) + str(msg.header.stamp.nanosec) + ".png"
+
+        if "color" in msg.header.frame_id:
+            self.gc_txt.write(self.gc+"\n")
+            self.rgb_txt.write(filename + "\n")
+        if "depth" in msg.header.frame_id:
+           self.depth_txt.write(filename + "\n")
+
+        img = self.bridge.imgmsg_to_cv2(msg, self.msg_fmt)
         cv2.imwrite(filename, img)
 
         """
@@ -362,34 +400,34 @@ class RosVideoWriter(Node):
         kill program once done.
         Otherwise, continue incrementing frame count.
         """
-        if self.frame_no == self.count:
-            print("Writing to output file, " + self.opt_out_file)
-            self._video_write_process = subprocess.Popen(
-                [
-                    VIDEO_CONVERTER_TO_USE,
-                    "-framerate",
-                    str(self.fps),
-                    "-pattern_type",
-                    "glob",
-                    "-i",
-                    "*.png",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    self.pix_fmt,
-                    self.opt_out_file,
-                    "-y",
-                ]
-            )
-            self._video_write_process.communicate()
-            self._video_write_process.join()
-            # Now remove all the jpeg image files.
-            args = ("rm ", "*.png")
-            self._file_cleanup_process = subprocess.call("%s %s" % args, shell=True)
-            print("Complete.")
-            sys.exit(0)
-        else:
-            self.frame_no = self.frame_no + 1
+        # if self.frame_no == self.count:
+            # print("Writing to output file, " + self.opt_out_file)
+            # self._video_write_process = subprocess.Popen(
+            #     [
+            #         VIDEO_CONVERTER_TO_USE,
+            #         "-framerate",
+            #         str(self.fps),
+            #         "-pattern_type",
+            #         "glob",
+            #         "-i",
+            #         "*.png",
+            #         "-c:v",
+            #         "libx264",
+            #         "-pix_fmt",
+            #         self.pix_fmt,
+            #         self.opt_out_file,
+            #         "-y",
+            #     ]
+            # )
+            # self._video_write_process.communicate()
+            # self._video_write_process.join()
+            # # Now remove all the jpeg image files.
+            # args = ("rm ", "*.png")
+            # self._file_cleanup_process = subprocess.call("%s %s" % args, shell=True)
+            # print("Complete.")
+        #     sys.exit(0)
+        # else:
+        #     self.frame_no = self.frame_no + 1
 
     def exit(self, value):
         # Close any running processes.

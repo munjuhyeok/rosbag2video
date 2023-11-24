@@ -385,7 +385,7 @@ class RosVideoWriter(Node):
         # self.msg_fmt = "rgb8"
         # print("AJB: msg: ", msg)
 
-        timestamp = str(msg.header.stamp.sec) + "." + str(msg.header.stamp.nanosec // 1000000)
+        timestamp = str(msg.header.stamp.sec) + "." + str(msg.header.stamp.nanosec // 100000).zfill(4)
         path = "/".join(msg.header.frame_id.split("_"))
         filename = path + "/" + timestamp + ".png"
 
